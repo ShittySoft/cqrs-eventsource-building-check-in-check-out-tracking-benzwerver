@@ -1,6 +1,6 @@
 <?php
 
-declare(strict_types=1);
+declare(strict_types = 1);
 
 use Building\Domain\Aggregate\Building;
 use Building\Domain\Command;
@@ -48,7 +48,7 @@ call_user_func(function () {
             Connection::class => function () {
                 $connection = DriverManager::getConnection([
                     'driverClass' => Driver::class,
-                    'path'        => __DIR__ . '/../data/db.sqlite3',
+                    'path' => __DIR__ . '/../data/db.sqlite3',
                 ]);
 
                 try {
@@ -65,8 +65,8 @@ call_user_func(function () {
                 return $connection;
             },
 
-            EventStore::class                  => function (ContainerInterface $container) {
-                $eventBus   = new EventBus();
+            EventStore::class => function (ContainerInterface $container) {
+                $eventBus = new EventBus();
                 $eventStore = new EventStore(
                     new DoctrineEventStoreAdapter(
                         $container->get(Connection::class),
@@ -92,9 +92,10 @@ call_user_func(function () {
                     public function __construct(
                         ContainerInterface $eventHandlers,
                         ContainerInterface $projectors
-                    ) {
+                    )
+                    {
                         $this->eventHandlers = $eventHandlers;
-                        $this->projectors    = $projectors;
+                        $this->projectors = $projectors;
                     }
 
                     public function attach(ActionEventEmitter $dispatcher)
@@ -113,7 +114,7 @@ call_user_func(function () {
 
                         $handlers = [];
 
-                        $listeners  = $messageName . '-listeners';
+                        $listeners = $messageName . '-listeners';
                         $projectors = $messageName . '-projectors';
 
                         if ($this->projectors->has($projectors)) {
@@ -135,11 +136,12 @@ call_user_func(function () {
                 return $eventStore;
             },
 
-            CommandBus::class                  => function (ContainerInterface $container) : CommandBus {
+            CommandBus::class => function (ContainerInterface $container) : CommandBus {
                 $commandBus = new CommandBus();
 
                 $commandBus->utilize(new \Prooph\ServiceBus\Plugin\ServiceLocatorPlugin($container));
-                $commandBus->utilize(new class implements ActionEventListenerAggregate {
+                $commandBus->utilize(new class implements ActionEventListenerAggregate
+                {
                     public function attach(ActionEventEmitter $dispatcher)
                     {
                         $dispatcher->attachListener(MessageBus::EVENT_ROUTE, [$this, 'onRoute']);
@@ -171,6 +173,29 @@ call_user_func(function () {
             Command\RegisterNewBuilding::class => function (ContainerInterface $container) : RegisterNewBuildingHandler {
                 return new RegisterNewBuildingHandler($container->get(BuildingRepositoryInterface::class));
             },
+            Command\CheckUserInIntoBuilding::class => function (ContainerInterface $container): Closure {
+                /* @var $repository BuildingRepositoryInterface */
+                $repository = $container->get(BuildingRepositoryInterface::class);
+
+                return function (Command\CheckUserInIntoBuilding $checkIn) use ($repository) {
+                    $building = $repository->get(Uuid::fromString($checkIn->getBuildingId()));
+
+                    $building->checkInUser($checkIn->getUsername());
+                    $repository->add($building);
+                };
+            },
+            Command\CheckUserOutOfBuilding::class => function(ContainerInterface $container): Closure {
+                /* @var $repository BuildingRepositoryInterface */
+                $repository = $container->get(BuildingRepositoryInterface::class);
+
+                return function (Command\CheckUserOutOfBuilding $checkOut) use ($repository) {
+                    $building = $repository->get(Uuid::fromString($checkOut->getBuildingId()));
+
+                    $building->checkOutUser($checkOut->getUsername());
+                    $repository->add($building);
+                };
+            },
+
             BuildingRepositoryInterface::class => function (ContainerInterface $container) : BuildingRepositoryInterface {
                 return new BuildingRepository(
                     new AggregateRepository(
@@ -180,6 +205,46 @@ call_user_func(function () {
                     )
                 );
             },
+
+            DomainEvent\UserCheckedInIntoBuilding::class . '-listeners' => function() {
+                return [];
+            },
+
+            DomainEvent\UserCheckedInIntoBuilding::class . '-projectors' => function() {
+                return [
+                    function(DomainEvent\UserCheckedInIntoBuilding $checkedInIntoBuilding) {
+                        $path = __DIR__ . '/' . $checkedInIntoBuilding->aggregateId() . '.json';
+
+                        $checkedInUsers = [];
+
+                        if (true === file_exists($path)) {
+                            $checkedInUsers = json_decode(file_get_contents($path), true);
+                        }
+
+                        $checkedInUsers[] = $checkedInIntoBuilding->username();
+
+                        file_put_contents($path, json_encode(array_values($checkedInUsers)));
+                    }
+                ];
+            },
+
+            DomainEvent\UserCheckedOutOfBuilding::class . '-projectors' => function() {
+                return [
+                    function(DomainEvent\UserCheckedOutOfBuilding $checkedOutOfBuilding) {
+                        $path = __DIR__ . '/' . $checkedOutOfBuilding->aggregateId() . '.json';
+
+                        $checkedInUsers = [];
+
+                        if (true === file_exists($path)) {
+                            $checkedInUsers = json_decode(file_get_contents($path), true);
+                        }
+
+                        unset($checkedInUsers[array_search($checkedOutOfBuilding->username(), $checkedInUsers)]);
+
+                        file_put_contents($path, json_encode(array_values($checkedInUsers)));
+                    }
+                ];
+            }
         ],
     ]);
 
@@ -211,11 +276,31 @@ call_user_func(function () {
     });
 
     $app->post('/checkin/{buildingId}', function (Request $request, Response $response) use ($sm) {
+        $commandBus = $sm->get(CommandBus::class);
 
+        $commandBus->dispatch(new Command\CheckUserInIntoBuilding(
+            $request->getParsedBody()['username'],
+            $request->getAttribute('buildingId')
+        ));
+
+        return $response->withAddedHeader('Location', sprintf('/building/%s', $request->getAttribute('buildingId')));
     });
 
     $app->post('/checkout/{buildingId}', function (Request $request, Response $response) use ($sm) {
+try {
+        $commandBus = $sm->get(CommandBus::class);
 
+        $commandBus->dispatch(new Command\CheckUserOutOfBuilding(
+            $request->getParsedBody()['username'],
+            $request->getAttribute('buildingId')
+        ));
+
+
+} catch (\Throwable $e) {
+    echo $e->getMessage(); die();
+}
+
+        return $response->withAddedHeader('Location', sprintf('/building/%s', $request->getAttribute('buildingId')));
     });
 
     $app->run();
